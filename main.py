@@ -2,15 +2,22 @@ import os
 import random
 import asyncio
 import re
+import socks
 from pathlib import Path
 
-from telethon import TelegramClient, functions, types
+from telethon import TelegramClient, functions, types, connection
 from telethon.errors.rpcerrorlist import FloodWaitError
-from telethon.network import proxy
-
+from telethon.tl.types import (
+    InputReportReasonSpam,
+    InputReportReasonViolence,
+    InputReportReasonPornography,
+    InputReportReasonChildAbuse,
+    InputReportReasonCopyright,
+    InputReportReasonFake,
+    InputReportReasonOther,
+)
 from colorama import Fore, Style, init as colorama_init
 
-# Initialize colorama for colored terminal output
 colorama_init(autoreset=True)
 
 # API credentials
@@ -21,20 +28,22 @@ API_HASH = '65e1f714a47c0879734553dc460e98d6'
 SESSIONS_DIR = Path(__file__).parent / 'sessions'
 PROXY_FILE = Path(__file__).parent / 'proxy.txt'
 
-# Report reasons mapping to Telethon types
+# Report reasons dictionary as requested
 REASONS = {
-    "Pornography": types.ReportReasonPornography(),
-    "Spam": types.ReportReasonSpam(),
-    "Violence": types.ReportReasonViolence(),
-    "Child Abuse": types.ReportReasonChildAbuse(),
-    "Other": types.ReportReasonOther()
+    "spam": InputReportReasonSpam(),
+    "violence": InputReportReasonViolence(),
+    "pornography": InputReportReasonPornography(),
+    "child abuse": InputReportReasonChildAbuse(),
+    "copyright infringement": InputReportReasonCopyright(),
+    "scam": InputReportReasonFake(),
+    "other": InputReportReasonOther(),
 }
 
 
 def banner():
-    print(Fore.CYAN + "="*50)
+    print(Fore.CYAN + "=" * 50)
     print(Fore.GREEN + "     Telegram Report Automation Tool     ")
-    print(Fore.CYAN + "="*50)
+    print(Fore.CYAN + "=" * 50)
 
 
 def load_sessions():
@@ -49,6 +58,13 @@ def load_sessions():
 
 
 def load_proxies():
+    """
+    Load proxies from proxy.txt.
+    Expected format per line:
+    host:port
+    or
+    host:port:user:pass
+    """
     proxies = []
     if not PROXY_FILE.exists():
         print(Fore.YELLOW + f"No proxy file '{PROXY_FILE}' found. Continuing without proxies.")
@@ -57,15 +73,13 @@ def load_proxies():
     with open(PROXY_FILE, 'r') as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith("#"):
+            if not line or line.startswith('#'):
                 continue
             parts = line.split(':')
             if len(parts) == 2:
-                # host:port
                 host, port = parts
                 proxies.append((host, int(port), None, None))
             elif len(parts) == 4:
-                # host:port:user:pass
                 host, port, user, pwd = parts
                 proxies.append((host, int(port), user, pwd))
             else:
@@ -77,20 +91,20 @@ def get_telethon_proxy(proxy_tuple):
     if proxy_tuple is None:
         return None
     host, port, user, pwd = proxy_tuple
-    # Telethon proxy tuple format:
-    # (proxy_type, addr, port, rdns, username, password)
-    # Using SOCKS5 proxy here:
-    return (proxy.SOCKS5, host, port, True, user, pwd)
+    # proxy tuple format for Telethon:
+    # (proxy_type, address, port, rdns, username, password)
+    return (socks.SOCKS5, host, port, True, user, pwd)
 
 
 def parse_msg_link(link):
     """
-    Parse Telegram message link to extract entity (username or peer id) and msg_id.
-    Supports links in formats like:
-    - https://t.me/username/123
-    - https://t.me/c/123456789/123
+    Parse Telegram message link to extract (entity, msg_id).
+    Supports:
+      - https://t.me/username/123
+      - https://t.me/c/123456789/123
 
-    Returns tuple (entity, msg_id) or (None, None) on failure.
+    Returns:
+      (entity, msg_id) or (None, None) if invalid.
     """
     m = re.match(r"https?://t\.me/(c/)?([\w\d_]+)/(\d+)", link)
     if not m:
@@ -104,7 +118,7 @@ def parse_msg_link(link):
         try:
             channel_id = int(channel_part)
             entity = int("-100" + str(channel_id))
-        except:
+        except Exception:
             entity = channel_part
     else:
         entity = channel_part
@@ -114,16 +128,15 @@ def parse_msg_link(link):
 
 async def send_report(client, entity, reason, message_text, msg_id=None):
     """
-    Sends a report using the TelegramClient.
+    Send a report using the Telegram client.
 
     Returns:
-    - True if report sent successfully.
-    - "flood" if FloodWaitError encountered.
-    - False on other errors.
+      True if success,
+      "flood" if flood wait,
+      False otherwise.
     """
     try:
         if msg_id:
-            # Reporting a specific message
             await client(functions.messages.ReportRequest(
                 peer=entity,
                 id=[msg_id],
@@ -131,7 +144,6 @@ async def send_report(client, entity, reason, message_text, msg_id=None):
                 message=message_text
             ))
         else:
-            # Reporting user/channel/group
             await client(functions.account.ReportRequest(
                 peer=entity,
                 reason=reason,
@@ -140,10 +152,9 @@ async def send_report(client, entity, reason, message_text, msg_id=None):
         return True
 
     except FloodWaitError as e:
-        print(Fore.YELLOW + f"Flood limit hit, sleeping for {e.seconds} seconds.")
+        print(Fore.YELLOW + f"Flood wait detected, sleeping for {e.seconds} seconds...")
         await asyncio.sleep(e.seconds + 1)
         return "flood"
-
     except Exception as e:
         print(Fore.RED + f"Report failed with error: {e}")
         return False
@@ -221,6 +232,7 @@ async def main_menu():
             API_ID,
             API_HASH,
             proxy=proxy,
+            connection=connection.ConnectionTcpFull
         )
 
         try:
@@ -257,8 +269,8 @@ async def main_menu():
     total_attempts = len(sessions) * report_per_session
     print(Style.BRIGHT + "\n📊 Final Report Summary:")
     print(Fore.GREEN + f"✅ Successful: {success}")
-    print(Fore.YELLOW + f"⚠️  FloodWaits:  {flood}")
-    print(Fore.RED + f"❌ Failed:     {failed}")
+    print(Fore.YELLOW + f"⚠️ FloodWaits: {flood}")
+    print(Fore.RED + f"❌ Failed: {failed}")
     print(Fore.CYAN + f"🧮 Total Attempts: {total_attempts}")
     print(Fore.GREEN + "\n🎯 Done.\n")
 
