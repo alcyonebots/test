@@ -6,18 +6,18 @@ from pathlib import Path
 
 from telethon import TelegramClient, functions, types
 from telethon.errors.rpcerrorlist import FloodWaitError
-from telethon.extensions import sockslib
+from telethon.network import proxy
 
 from colorama import Fore, Style, init as colorama_init
 
-# Initialize colorama for colored output on Windows/mac
+# Initialize colorama for colored terminal output
 colorama_init(autoreset=True)
 
 # API credentials
 API_ID = 29872536
 API_HASH = '65e1f714a47c0879734553dc460e98d6'
 
-# Directories and files
+# Paths
 SESSIONS_DIR = Path(__file__).parent / 'sessions'
 PROXY_FILE = Path(__file__).parent / 'proxy.txt'
 
@@ -77,9 +77,10 @@ def get_telethon_proxy(proxy_tuple):
     if proxy_tuple is None:
         return None
     host, port, user, pwd = proxy_tuple
-    # Telethon expects (proxy_type, addr, port, rdns, username, password)
-    # Enable rdns (resolve remote DNS) True here for socks5
-    return (sockslib.SOCKS5, host, port, True, user, pwd)
+    # Telethon proxy tuple format:
+    # (proxy_type, addr, port, rdns, username, password)
+    # Using SOCKS5 proxy here:
+    return (proxy.SOCKS5, host, port, True, user, pwd)
 
 
 def parse_msg_link(link):
@@ -91,7 +92,6 @@ def parse_msg_link(link):
 
     Returns tuple (entity, msg_id) or (None, None) on failure.
     """
-    # Match private channel (c/...) and public username message links
     m = re.match(r"https?://t\.me/(c/)?([\w\d_]+)/(\d+)", link)
     if not m:
         return None, None
@@ -101,15 +101,12 @@ def parse_msg_link(link):
     msg_id = int(m.group(3))
 
     if is_private:
-        # For private channels the entity ID is -100 + channel ID
         try:
             channel_id = int(channel_part)
-            entity = int("-100"+str(channel_id))
+            entity = int("-100" + str(channel_id))
         except:
-            # fallback: treat as string if cannot parse to int
             entity = channel_part
     else:
-        # Public username
         entity = channel_part
 
     return entity, msg_id
@@ -164,13 +161,11 @@ async def main_menu():
     print(Fore.CYAN + f"🔐 Loaded sessions: {len(sessions)}")
     print(Fore.MAGENTA + f"🌐 Loaded proxies:  {len(proxies)}\n")
 
-    # How many reports per session
     report_per_session = input(Fore.GREEN + "💣 How many reports per session? ").strip()
     while not report_per_session.isdigit() or int(report_per_session) < 1:
         report_per_session = input("Enter a valid number (>=1): ").strip()
     report_per_session = int(report_per_session)
 
-    # What to report?
     print("\n🧭 What do you want to report?")
     print("1. Telegram User")
     print("2. Channel")
@@ -195,7 +190,6 @@ async def main_menu():
             print(Fore.RED + "❌ Invalid input. Aborting.")
             return
 
-    # Choose reason
     print("\n📚 Available reasons:")
     for i, key in enumerate(REASONS.keys(), 1):
         print(Fore.YELLOW + f"{i}. {key}")
@@ -220,21 +214,22 @@ async def main_menu():
         proxy_tuple = random.choice(proxies) if proxies else None
         proxy = get_telethon_proxy(proxy_tuple)
 
-        session_name = session_path.stem  # filename without .session
+        session_name = session_path.stem
 
         client = TelegramClient(
             str(SESSIONS_DIR / session_name),
             API_ID,
             API_HASH,
             proxy=proxy,
-            # you may adjust connection mode if needed, e.g. connection=ConnectionTcpAbridged,
         )
 
         try:
             await client.connect()
+
             if not await client.is_user_authorized():
                 print(Fore.RED + f"[{idx}] Session '{session_name}' is not authorized. Skipping.")
                 failed += report_per_session
+                await client.disconnect()
                 continue
 
             name = session_path.name
